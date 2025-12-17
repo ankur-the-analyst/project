@@ -2907,6 +2907,7 @@
                 const [videoEnabled, setVideoEnabled] = useState(true);
                 const peerConnectionsRef = useRef({}); // Map of userId -> RTCPeerConnection
                 const remoteStreamsRef = useRef({}); // Map of userId -> MediaStream
+                const createPeerConnectionRef = useRef(null);
 
             // Restore session from localStorage on mount (before loading data)
             useEffect(() => {
@@ -3201,7 +3202,13 @@
                                     setCurrentCallId(data.callId);
                                     
                                     // Create peer connection with the initiator
-                                    createPeerConnectionForParticipant(data.from, data.callId, stream, false);
+                                    if (createPeerConnectionRef.current) {
+                                        createPeerConnectionRef.current(data.from, data.callId, stream, false).catch(e => {
+                                            console.error('Error creating peer connection:', e);
+                                        });
+                                    } else {
+                                        console.error('createPeerConnectionForParticipant is not available yet');
+                                    }
                                 }).catch(e => {
                                     console.error('Failed to join meeting:', e);
                                     alert('Failed to join meeting: ' + e.message);
@@ -3447,55 +3454,7 @@
                 }
             };
             
-            // Meeting functions
-            const startMeeting = async (participantIds, type = 'video') => {
-                if (!supabase) return alert('Realtime (Supabase) is required for meetings.');
-                if (participantIds.length === 0) return;
-                
-                setMeetingType(type);
-                setIsInMeeting(true);
-                
-                try {
-                    // Get user media
-                    const constraints = {
-                        audio: true,
-                        video: type === 'video' ? true : false
-                    };
-                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
-                    localStreamRef.current = stream;
-                    setVideoEnabled(type === 'video');
-                    
-                    // Get participant user objects
-                    const participants = allUsers.filter(u => participantIds.includes(u.id));
-                    setMeetingParticipants(participants);
-                    
-                    // Create peer connections for each participant
-                    const callId = `meeting-${Date.now()}`;
-                    setCurrentCallId(callId);
-                    
-                    for (const participant of participants) {
-                        await createPeerConnectionForParticipant(participant.id, callId, stream, true);
-                    }
-                    
-                    // Notify participants about the meeting
-                    for (const participant of participants) {
-                        await sendSignal({
-                            type: 'meeting-invite',
-                            from: currentUser.id,
-                            fromName: currentUser.name,
-                            target: participant.id,
-                            callId: callId,
-                            meetingType: type,
-                            participants: participantIds
-                        });
-                    }
-                } catch (e) {
-                    console.error('Start meeting error', e);
-                    alert('Failed to start meeting: ' + e.message);
-                    setIsInMeeting(false);
-                }
-            };
-            
+            // Meeting functions - define helper first
             const createPeerConnectionForParticipant = async (targetId, callId, localStream, isInitiator) => {
                 const pc = new RTCPeerConnection({
                     iceServers: [
@@ -3565,6 +3524,57 @@
                 }
                 
                 return pc;
+            };
+            
+            // Store function in ref for access from useEffect closures
+            createPeerConnectionRef.current = createPeerConnectionForParticipant;
+            
+            const startMeeting = async (participantIds, type = 'video') => {
+                if (!supabase) return alert('Realtime (Supabase) is required for meetings.');
+                if (participantIds.length === 0) return;
+                
+                setMeetingType(type);
+                setIsInMeeting(true);
+                
+                try {
+                    // Get user media
+                    const constraints = {
+                        audio: true,
+                        video: type === 'video' ? true : false
+                    };
+                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    localStreamRef.current = stream;
+                    setVideoEnabled(type === 'video');
+                    
+                    // Get participant user objects
+                    const participants = allUsers.filter(u => participantIds.includes(u.id));
+                    setMeetingParticipants(participants);
+                    
+                    // Create peer connections for each participant
+                    const callId = `meeting-${Date.now()}`;
+                    setCurrentCallId(callId);
+                    
+                    for (const participant of participants) {
+                        await createPeerConnectionForParticipant(participant.id, callId, stream, true);
+                    }
+                    
+                    // Notify participants about the meeting
+                    for (const participant of participants) {
+                        await sendSignal({
+                            type: 'meeting-invite',
+                            from: currentUser.id,
+                            fromName: currentUser.name,
+                            target: participant.id,
+                            callId: callId,
+                            meetingType: type,
+                            participants: participantIds
+                        });
+                    }
+                } catch (e) {
+                    console.error('Start meeting error', e);
+                    alert('Failed to start meeting: ' + e.message);
+                    setIsInMeeting(false);
+                }
             };
             
             const endMeeting = () => {
@@ -4601,3 +4611,4 @@
 </body>
 </html>
 </html>
+
