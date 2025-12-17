@@ -2966,13 +2966,21 @@
 
             // Load data from Supabase on mount
             useEffect(() => {
-                if (!supabase) {
-                    setLoading(false);
-                    return;
-                }
-
                 const loadData = async () => {
                     try {
+                        // If Supabase is not available, use initial data
+                        if (!supabase) {
+                            console.warn('⚠️ Supabase not available, using local data');
+                            setAllUsers(INITIAL_USERS);
+                            setProjects(INITIAL_PROJECTS);
+                            setTasks(INITIAL_TASKS);
+                            setChats(INITIAL_CHATS);
+                            setMessages(INITIAL_MESSAGES);
+                            setLoading(false);
+                            return;
+                        }
+
+                        try {
                         // Load users
                         const { data: usersData, error: usersError } = await supabase
                             .from('users')
@@ -3053,19 +3061,12 @@
                                 attachment: m.attachment ? (typeof m.attachment === 'string' ? JSON.parse(m.attachment) : m.attachment) : null
                             })));
                         }
-                    } catch (error) {
-                        console.error('Error loading data:', error);
-                    } finally {
-                        setLoading(false);
-                    }
-                };
 
-                loadData();
-
-                // Set up real-time subscriptions
-                if (supabase) {
-                    // Subscribe to tasks changes
-                    const tasksChannel = supabase
+                        // Set up real-time subscriptions
+                        if (supabase) {
+                            try {
+                                // Subscribe to tasks changes
+                                const tasksChannel = supabase
                         .channel('tasks-changes')
                         .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, (payload) => {
                             const task = payload.new || payload.old;
@@ -3157,134 +3158,180 @@
                             }
                         })
                         .subscribe();
+                            } catch (error) {
+                                console.error('Error setting up real-time subscriptions:', error);
+                            }
+                        }
+                    } catch (error) {
+                        console.error('Error loading data:', error);
+                    } finally {
+                        setLoading(false);
+                    }
+                };
 
-                    return () => {
-                        supabase.removeChannel(tasksChannel);
-                        supabase.removeChannel(messagesChannel);
-                        if (callChannel) supabase.removeChannel(callChannel);
-                    };
-                }
+                loadData();
+
+                // Cleanup function for useEffect
+                return () => {
+                    try {
+                        if (supabase) {
+                            // Channels will be cleaned up automatically, but we can add explicit cleanup if needed
+                        }
+                    } catch (e) {
+                        console.warn('Error in cleanup:', e);
+                    }
+                };
             }, []); 
 
             // Setup a broadcast channel for WebRTC signaling
             useEffect(() => {
                 if (!supabase || !currentUser) return;
 
-                const channel = supabase.channel('webrtc-signaling');
-                channel.on('broadcast', { event: '*' }, async (payload) => {
-                    const msg = (payload && (payload.payload || payload)) || payload;
-                    try {
-                        const data = msg.payload || msg;
-                        if (!data || data.target !== currentUser.id) return;
+                try {
+                    const channel = supabase.channel('webrtc-signaling');
+                    channel.on('broadcast', { event: '*' }, async (payload) => {
+                        try {
+                            const msg = (payload && (payload.payload || payload)) || payload;
+                            const data = msg.payload || msg;
+                            if (!data || !data.target || data.target !== currentUser.id) return;
 
-                        // handle signaling messages
-                        if (data.type === 'meeting-invite') {
-                            // Meeting invite
-                            const accept = window.confirm(`${data.fromName} is inviting you to a ${data.meetingType} meeting. Join now?`);
-                            if (accept) {
-                                // Join the meeting
-                                const constraints = {
-                                    audio: true,
-                                    video: data.meetingType === 'video' ? true : false
-                                };
-                                navigator.mediaDevices.getUserMedia(constraints).then(stream => {
-                                    localStreamRef.current = stream;
-                                    setVideoEnabled(data.meetingType === 'video');
-                                    setMeetingType(data.meetingType);
-                                    setIsInMeeting(true);
-                                    
-                                    // Get all participants
-                                    const allParticipantIds = [...(data.participants || []), currentUser.id];
-                                    const participants = allUsers.filter(u => 
-                                        allParticipantIds.includes(u.id) && u.id !== currentUser.id
-                                    );
-                                    setMeetingParticipants(participants);
-                                    setCurrentCallId(data.callId);
-                                    
-                                    // Create peer connection with the initiator
-                                    if (createPeerConnectionRef.current) {
-                                        createPeerConnectionRef.current(data.from, data.callId, stream, false).catch(e => {
-                                            console.error('Error creating peer connection:', e);
-                                        });
-                                    } else {
-                                        console.error('createPeerConnectionForParticipant is not available yet');
+                            // handle signaling messages
+                            if (data.type === 'meeting-invite') {
+                                // Meeting invite
+                                const accept = window.confirm(`${data.fromName || 'Someone'} is inviting you to a ${data.meetingType || 'video'} meeting. Join now?`);
+                                if (accept) {
+                                    try {
+                                        // Join the meeting
+                                        const constraints = {
+                                            audio: true,
+                                            video: data.meetingType === 'video' ? true : false
+                                        };
+                                        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                                        localStreamRef.current = stream;
+                                        setVideoEnabled(data.meetingType === 'video');
+                                        setMeetingType(data.meetingType || 'video');
+                                        setIsInMeeting(true);
+                                        
+                                        // Get all participants
+                                        const allParticipantIds = [...(data.participants || []), currentUser.id];
+                                        const participants = allUsers.filter(u => 
+                                            allParticipantIds.includes(u.id) && u.id !== currentUser.id
+                                        );
+                                        setMeetingParticipants(participants);
+                                        setCurrentCallId(data.callId);
+                                        
+                                        // Create peer connection with the initiator
+                                        if (createPeerConnectionRef.current) {
+                                            createPeerConnectionRef.current(data.from, data.callId, stream, false).catch(e => {
+                                                console.error('Error creating peer connection:', e);
+                                            });
+                                        } else {
+                                            console.warn('createPeerConnectionForParticipant is not available yet');
+                                        }
+                                    } catch (e) {
+                                        console.error('Failed to join meeting:', e);
+                                        alert('Failed to join meeting: ' + (e.message || 'Unknown error'));
                                     }
-                                }).catch(e => {
-                                    console.error('Failed to join meeting:', e);
-                                    alert('Failed to join meeting: ' + e.message);
-                                });
-                            }
-                        } else if (data.type === 'call-init') {
-                            // incoming call
-                            setIncomingCall({ from: data.from, fromName: data.fromName, offer: data.offer, callId: data.callId });
-                        } else if (data.type === 'offer') {
-                            // Offer received
-                            if (isInMeeting) {
-                                // Handle offer in meeting context
-                                const pc = peerConnectionsRef.current[data.from];
-                                if (pc) {
-                                    await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-                                    const answer = await pc.createAnswer();
-                                    await pc.setLocalDescription(answer);
-                                    await sendSignal({
-                                        type: 'answer',
-                                        answer: answer,
-                                        from: currentUser.id,
-                                        target: data.from,
-                                        callId: data.callId
-                                    });
                                 }
-                            } else {
-                                // Direct call offer
+                            } else if (data.type === 'call-init') {
+                                // incoming call
                                 setIncomingCall({ from: data.from, fromName: data.fromName, offer: data.offer, callId: data.callId });
-                            }
-                        } else if (data.type === 'answer') {
-                            if (isInMeeting) {
-                                const pc = peerConnectionsRef.current[data.from];
-                                if (pc) {
-                                    await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                            } else if (data.type === 'offer') {
+                                // Offer received
+                                if (isInMeeting) {
+                                    // Handle offer in meeting context
+                                    const pc = peerConnectionsRef.current[data.from];
+                                    if (pc) {
+                                        try {
+                                            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+                                            const answer = await pc.createAnswer();
+                                            await pc.setLocalDescription(answer);
+                                            await sendSignal({
+                                                type: 'answer',
+                                                answer: answer,
+                                                from: currentUser.id,
+                                                target: data.from,
+                                                callId: data.callId
+                                            });
+                                        } catch (e) {
+                                            console.error('Error handling offer in meeting:', e);
+                                        }
+                                    }
+                                } else {
+                                    // Direct call offer
+                                    setIncomingCall({ from: data.from, fromName: data.fromName, offer: data.offer, callId: data.callId });
                                 }
-                            } else if (pcRef.current) {
-                                pcRef.current.setRemoteDescription(new RTCSessionDescription(data.answer)).catch(console.error);
-                            }
-                        } else if (data.type === 'ice') {
-                            if (isInMeeting) {
-                                const pc = peerConnectionsRef.current[data.from];
-                                if (pc && data.candidate) {
-                                    await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+                            } else if (data.type === 'answer') {
+                                try {
+                                    if (isInMeeting) {
+                                        const pc = peerConnectionsRef.current[data.from];
+                                        if (pc) {
+                                            await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                                        }
+                                    } else if (pcRef.current) {
+                                        await pcRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
+                                    }
+                                } catch (e) {
+                                    console.error('Error handling answer:', e);
                                 }
-                            } else if (pcRef.current && data.candidate) {
-                                pcRef.current.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(console.error);
-                            }
-                        } else if (data.type === 'hangup') {
-                            if (isInMeeting) {
-                                // Remove participant from meeting
-                                const pc = peerConnectionsRef.current[data.from];
-                                if (pc) {
-                                    pc.close();
-                                    delete peerConnectionsRef.current[data.from];
+                            } else if (data.type === 'ice') {
+                                try {
+                                    if (isInMeeting) {
+                                        const pc = peerConnectionsRef.current[data.from];
+                                        if (pc && data.candidate) {
+                                            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+                                        }
+                                    } else if (pcRef.current && data.candidate) {
+                                        await pcRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
+                                    }
+                                } catch (e) {
+                                    console.error('Error handling ICE candidate:', e);
                                 }
-                                if (remoteStreamsRef.current[data.from]) {
-                                    remoteStreamsRef.current[data.from].getTracks().forEach(t => t.stop());
-                                    delete remoteStreamsRef.current[data.from];
+                            } else if (data.type === 'hangup') {
+                                try {
+                                    if (isInMeeting) {
+                                        // Remove participant from meeting
+                                        const pc = peerConnectionsRef.current[data.from];
+                                        if (pc) {
+                                            pc.close();
+                                            delete peerConnectionsRef.current[data.from];
+                                        }
+                                        if (remoteStreamsRef.current[data.from]) {
+                                            remoteStreamsRef.current[data.from].getTracks().forEach(t => t.stop());
+                                            delete remoteStreamsRef.current[data.from];
+                                        }
+                                        setMeetingParticipants(prev => prev.filter(p => p.id !== data.from));
+                                    } else {
+                                        // remote hung up
+                                        if (typeof endCallLocal === 'function') {
+                                            endCallLocal();
+                                        }
+                                    }
+                                } catch (e) {
+                                    console.error('Error handling hangup:', e);
                                 }
-                                setMeetingParticipants(prev => prev.filter(p => p.id !== data.from));
-                            } else {
-                                // remote hung up
-                                endCallLocal();
                             }
+                        } catch (e) {
+                            console.error('Error handling signaling payload', e, payload);
                         }
-                    } catch (e) {
-                        console.error('Error handling signaling payload', e, payload);
-                    }
-                }).subscribe();
+                    });
+                    
+                    channel.subscribe();
+                    setCallChannel(channel);
 
-                setCallChannel(channel);
-
-                return () => {
-                    try { if (channel) supabase.removeChannel(channel); } catch(e){}
-                };
-            }, [supabase, currentUser]);
+                    return () => {
+                        try { 
+                            if (channel && supabase) {
+                                supabase.removeChannel(channel);
+                            }
+                        } catch(e){
+                            console.warn('Error removing channel:', e);
+                        }
+                    };
+                } catch (e) {
+                    console.error('Error setting up signaling channel:', e);
+                }
+            }, [supabase, currentUser, allUsers, isInMeeting]);
 
             // Helper to broadcast signaling messages
             const sendSignal = async (data) => {
@@ -3526,8 +3573,10 @@
                 return pc;
             };
             
-            // Store function in ref for access from useEffect closures
-            createPeerConnectionRef.current = createPeerConnectionForParticipant;
+            // Ensure function is stored in ref (update on every render to keep it current)
+            useEffect(() => {
+                createPeerConnectionRef.current = createPeerConnectionForParticipant;
+            });
             
             const startMeeting = async (participantIds, type = 'video') => {
                 if (!supabase) return alert('Realtime (Supabase) is required for meetings.');
@@ -4605,10 +4654,89 @@
             );
         }
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        // Error boundary for the entire app
+        function ErrorBoundary({ children }) {
+            const [hasError, setHasError] = useState(false);
+            const [error, setError] = useState(null);
+
+            useEffect(() => {
+                const handleError = (event) => {
+                    setHasError(true);
+                    setError(event.error || event.reason || 'Unknown error');
+                    console.error('App error:', event.error || event.reason);
+                };
+
+                window.addEventListener('error', handleError);
+                window.addEventListener('unhandledrejection', handleError);
+
+                return () => {
+                    window.removeEventListener('error', handleError);
+                    window.removeEventListener('unhandledrejection', handleError);
+                };
+            }, []);
+
+            if (hasError) {
+                return (
+                    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+                        <div className="bg-white max-w-md w-full rounded-xl shadow-lg p-8 text-center">
+                            <div className="text-red-600 text-4xl mb-4">⚠️</div>
+                            <h1 className="text-2xl font-bold text-slate-900 mb-2">Something went wrong</h1>
+                            <p className="text-slate-600 mb-4">The application encountered an error. Please refresh the page.</p>
+                            <button
+                                onClick={() => {
+                                    setHasError(false);
+                                    setError(null);
+                                    window.location.reload();
+                                }}
+                                className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 px-6 rounded-lg transition-colors"
+                            >
+                                Reload Page
+                            </button>
+                            {error && (
+                                <details className="mt-4 text-left">
+                                    <summary className="cursor-pointer text-sm text-slate-500">Error details</summary>
+                                    <pre className="mt-2 text-xs bg-slate-100 p-2 rounded overflow-auto max-h-40">
+                                        {error.toString()}
+                                    </pre>
+                                </details>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
+
+            return children;
+        }
+
+        // Initialize app with error handling
+        try {
+            const rootElement = document.getElementById('root');
+            if (!rootElement) {
+                throw new Error('Root element not found');
+            }
+            
+            const root = ReactDOM.createRoot(rootElement);
+            root.render(
+                <ErrorBoundary>
+                    <App />
+                </ErrorBoundary>
+            );
+        } catch (error) {
+            console.error('Failed to initialize app:', error);
+            document.body.innerHTML = `
+                <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #f1f5f9; padding: 1rem;">
+                    <div style="background: white; max-width: 28rem; width: 100%; border-radius: 0.75rem; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); padding: 2rem; text-align: center;">
+                        <div style="color: #dc2626; font-size: 2.5rem; margin-bottom: 1rem;">⚠️</div>
+                        <h1 style="font-size: 1.5rem; font-weight: bold; color: #0f172a; margin-bottom: 0.5rem;">Initialization Error</h1>
+                        <p style="color: #475569; margin-bottom: 1rem;">Failed to load the application. Please check your browser console for details.</p>
+                        <button onclick="window.location.reload()" style="background: #4f46e5; color: white; font-weight: 600; padding: 0.625rem 1.5rem; border-radius: 0.5rem; border: none; cursor: pointer;">
+                            Reload Page
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
     </script>
 </body>
-</html>
 </html>
 
